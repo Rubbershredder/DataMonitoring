@@ -1,0 +1,223 @@
+version: '3.8'
+
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.1
+    container_name: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+    volumes:
+      - /home/rubbershredder/dataStore/zookeeper/data:/var/lib/zookeeper/data
+      - /home/rubbershredder/dataStore/zookeeper/logs:/var/lib/zookeeper/log
+    networks:
+      - monitoring-network
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.1
+    container_name: kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+    volumes:
+      - /home/rubbershredder/dataStore/kafka/data:/var/lib/kafka/data
+    networks:
+      - monitoring-network
+
+  kafka-connect:
+    image: confluentinc/cp-kafka-connect:7.5.1
+    container_name: kafka-connect
+    depends_on:
+      - kafka
+      - postgres
+      # - mysql
+      # - mongodb
+    ports:
+      - "8083:8083"
+    environment:
+      CONNECT_BOOTSTRAP_SERVERS: kafka:29092
+      CONNECT_REST_PORT: 8083
+      CONNECT_GROUP_ID: compose-connect-group
+      CONNECT_CONFIG_STORAGE_TOPIC: docker-connect-configs
+      CONNECT_OFFSET_STORAGE_TOPIC: docker-connect-offsets
+      CONNECT_STATUS_STORAGE_TOPIC: docker-connect-status
+      CONNECT_KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      CONNECT_VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      CONNECT_INTERNAL_KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      CONNECT_INTERNAL_VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      CONNECT_REST_ADVERTISED_HOST_NAME: kafka-connect
+      CONNECT_PLUGIN_PATH: "/usr/share/java,/usr/share/confluent-hub-components"
+    volumes:
+      - /home/rubbershredder/dataStore/kafka-connect/plugins:/usr/share/confluent-hub-components
+    command:
+      - bash
+      - -c
+      - |
+        confluent-hub install --no-prompt debezium/debezium-connector-postgres:2.3.0
+        confluent-hub install --no-prompt debezium/debezium-connector-mysql:2.3.0
+        confluent-hub install --no-prompt mongodb/kafka-connect-mongodb:1.10.0
+        /etc/confluent/docker/run
+    networks:
+      - monitoring-network
+
+  postgres:
+    image: postgres:17-alpine
+    container_name: postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: monitoring_db
+      PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      - "5432:5432"
+    volumes:
+      - /home/rubbershredder/dataStore/postgres/data:/var/lib/postgresql/data
+    networks:
+      - monitoring-network
+
+  # mysql:
+  #   image: mysql:8.2
+  #   container_name: mysql
+  #   environment:
+  #     MYSQL_ROOT_PASSWORD: mysql@root
+  #     MYSQL_DATABASE: sample_db
+  #     MYSQL_USER: mysql
+  #     MYSQL_PASSWORD: mysql
+  #   ports:
+  #     - "3306:3306"
+  #   volumes:
+  #     - /home/rubbershredder/dataStore/mysql/data:/var/lib/mysql
+  #   networks:
+  #     - monitoring-network
+
+  # mongodb:
+  #   image: mongo:6.0
+  #   container_name: mongodb
+  #   environment:
+  #     MONGO_INITDB_ROOT_USERNAME: mongo_user
+  #     MONGO_INITDB_ROOT_PASSWORD: mongo_pass
+  #   ports:
+  #     - "27017:27017"
+  #   volumes:
+  #     - /home/rubbershredder/dataStore/mongodb/data:/data/db
+  #   networks:
+  #     - monitoring-network
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.3
+    container_name: elasticsearch
+    environment:
+      - node.name=elasticsearch
+      - cluster.name=es-docker-cluster
+      - discovery.type=single-node
+      - bootstrap.memory_lock=true
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+      - xpack.security.enabled=false
+    ports:
+      - "9200:9200"
+    volumes:
+      - /home/rubbershredder/dataStore/elasticsearch/data:/usr/share/elasticsearch/data
+    networks:
+      - monitoring-network
+
+  # Flink Configuration Fix
+  flink-jobmanager:
+    image: apache/flink:1.18-scala_2.12
+    container_name: flink-jobmanager
+    ports:
+      - "8081:8081"
+    command: jobmanager
+    environment:
+      - |
+        FLINK_PROPERTIES=
+        jobmanager.rpc.address: flink-jobmanager
+        jobmanager.memory.process.size: 1600m
+    volumes:
+      - /home/rubbershredder/dataStore/flink/checkpoints:/flink-checkpoints
+      - /home/rubbershredder/dataStore/flink/jars:/opt/flink/usrlib
+    networks:
+      - monitoring-network
+
+  flink-taskmanager:
+    image: apache/flink:1.18-scala_2.12
+    container_name: flink-taskmanager
+    depends_on:
+      - flink-jobmanager
+    command: taskmanager
+    environment:
+      - |
+        FLINK_PROPERTIES=
+        jobmanager.rpc.address: flink-jobmanager
+        taskmanager.numberOfTaskSlots: 2
+        taskmanager.memory.process.size: 1728m
+    volumes:
+      - /home/rubbershredder/dataStore/flink/checkpoints:/flink-checkpoints
+      - /home/rubbershredder/dataStore/flink/jars:/opt/flink/usrlib
+    networks:
+      - monitoring-network
+
+  # Prometheus
+  prometheus:
+    image: prom/prometheus:v2.45.0
+    container_name: prometheus
+    user: "65534:65534"
+    ports:
+      - "9090:9090"
+    volumes:
+      - /home/rubbershredder/dataStore/prometheus/config:/etc/prometheus
+      - /home/rubbershredder/dataStore/prometheus/data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--web.enable-lifecycle'
+    networks:
+      - monitoring-network
+
+  # Grafana
+  grafana:
+    image: grafana/grafana:9.5.3
+    container_name: grafana
+    user: "472:472" 
+    ports:
+      - "3000:3000"
+    volumes:
+      - /home/rubbershredder/dataStore/grafana/data:/var/lib/grafana
+      - /home/rubbershredder/dataStore/grafana/provisioning:/etc/grafana/provisioning
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    networks:
+      - monitoring-network
+
+  # OpenTelemetry Collector
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.86.0
+    container_name: otel-collector
+    ports:
+      - "4317:4317"  # OTLP gRPC receiver
+      - "4318:4318"  # OTLP HTTP receiver
+    volumes:
+      - /home/rubbershredder/dataStore/otel/config:/etc/otelcol-contrib
+    command:
+      - --config=/etc/otelcol-contrib/config.yaml
+    networks:
+      - monitoring-network
+
+networks:
+  monitoring-network:
+    driver: bridge
